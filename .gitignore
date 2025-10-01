@@ -1,0 +1,23 @@
+# Environnement virtuel Python - NE JAMAIS VERSIONNER
+venv/
+
+# Fichiers cache Python
+__pycache__/
+*.pyc
+
+# Bases de données générées - NE JAMAIS VERSIONNER
+*.db
+
+# Fichiers de données volumineux et fichiers CSV générés
+data/
+*.zip
+*.txt
+*.csv
+
+# Fichiers de log
+cron_log.txt
+
+# Exceptions : Fichiers que l'on veut garder malgré les règles ci-dessus
+!finess_direct_url.txt
+!last_modified_timestamp.txt
+!plan d'action
