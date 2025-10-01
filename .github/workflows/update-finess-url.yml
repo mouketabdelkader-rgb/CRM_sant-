@@ -1,0 +1,44 @@
+name: Mettre à jour l'URL de téléchargement FINESS
+
+# Déclencheurs :
+on:
+  # 1. Automatiquement, tous les lundis à 5h du matin
+  schedule:
+    - cron: '0 5 * * 1'
+  # 2. Manuellement, depuis l'onglet "Actions" de GitHub (pour nos tests !)
+  workflow_dispatch:
+
+jobs:
+  fetch-url:
+    runs-on: ubuntu-latest
+    # Donne la permission au robot d'écrire dans votre repository
+    permissions:
+      contents: write
+    steps:
+      # Étape 1: Récupère la dernière version de votre code
+      - name: Checkout du code
+        uses: actions/checkout@v3
+
+      # Étape 2: Exécute notre commande curl pour trouver l'URL depuis un serveur non-bloqué
+      - name: Récupérer l'URL FINESS et la sauvegarder
+        run: |
+          echo "Récupération de l'URL via l'API de data.gouv.fr..."
+          FINESS_URL=$(curl -sL "https://www.data.gouv.fr/api/1/datasets/?q=Fichier%20National%20des%20Etablissements" | jq -r '.data[] | select(.title | contains("Fichier National des Etablissements Sanitaires et Sociaux")) | .resources[] | select(.format == "csv" and (.title | contains("Extraction du fichier FINESS"))) | .url' | head -n 1)
+          
+          if [ -z "$FINESS_URL" ]; then
+            echo "::error::L'URL FINESS n'a pas pu être récupérée. Le workflow échoue."
+            exit 1
+          fi
+          
+          echo "URL trouvée: $FINESS_URL"
+          echo "$FINESS_URL" > finess_direct_url.txt
+
+      # Étape 3: Commit et pousse le nouveau fichier avec l'URL dans le repository
+      - name: Commit de la nouvelle URL
+        run: |
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add finess_direct_url.txt
+          # Ne commit que si le fichier a réellement changé
+          git diff --staged --quiet || git commit -m "MAJ automatique: URL de téléchargement FINESS"
+          git push
