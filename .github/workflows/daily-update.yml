@@ -1,0 +1,51 @@
+name: Tâche Quotidienne du CRM Santé
+
+on:
+  schedule:
+    # S'exécute tous les jours à 6h00 du matin (UTC)
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  daily-crm-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Mise en place de Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Installation des dépendances
+        run: pip install -r requirements.txt
+
+      - name: Vérification de nouvelle mise à jour
+        id: check_update
+        run: echo "$(python auto_maj.py)" >> $GITHUB_OUTPUT
+
+      - name: Lancement du processus de mise à jour
+        if: steps.check_update.outputs.is_new_update == 'true'
+        run: |
+          echo "Nouvelle version détectée. Lancement de la mise à jour complète..."
+          python setup_crm_sante.py
+          python detect_nouveaux.py
+          # Note: On ajoutera enrich_sirene.py ici plus tard
+          echo "Mise à jour de la base de données et détection des nouveaux terminées."
+
+      - name: Notification par Email
+        if: steps.check_update.outputs.is_new_update == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: '[CRM Santé] Mise à jour effectuée - Nouveaux Professionnels Détectés'
+          body: |
+            Le processus de mise à jour quotidien du CRM Santé a été exécuté avec succès.
+            Une nouvelle version de l'annuaire a été traitée.
+            Un nouveau fichier de prospects est disponible.
+          to: ${{ secrets.NOTIFICATION_EMAIL_TO }}
+          from: CRM Santé Robot <${{ secrets.SMTP_USERNAME }}>

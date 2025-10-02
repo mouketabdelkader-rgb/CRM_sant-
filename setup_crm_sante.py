@@ -1,75 +1,146 @@
+import sqlite3
+import pandas as pd
 import requests
 import zipfile
-import pandas as pd
-import sqlite3
 import os
-import glob
 from datetime import datetime
-import time  # Pour flush disque
 
-# Config
-URL = "https://service.annuaire.sante.fr/annuaire-sante-webservices/V300/services/extraction/PS_LibreAcces"
-DB_FILE = "crm_sante_current.db"
-DELIMITER = '|'
+# --- CONFIGURATION ---
+DB_NAME = "crm_sante.db"
+ZIP_URL = "https://service.annuaire.sante.fr/annuaire-sante-webservices/V300/services/extraction/PS_LibreAcces"
+ZIP_PATH = "PS_LibreAcces.zip"
+CHUNK_SIZE = 100000
 
-def download_and_extract(url, zip_path="temp.zip"):
-    print("Téléchargement en cours... (Bypass SSL activé pour test ? non recommandé en prod)")
-    response = requests.get(url, stream=True, verify=False)
-    if response.status_code == 200:
-        with open(zip_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
+def creer_base_de_donnees():
+    """Crée la base de données et les 3 tables si elles n'existent pas."""
+    print(f"Initialisation de la base de données '{DB_NAME}'...")
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS professionnels (
+            id_pp TEXT PRIMARY KEY,
+            nom TEXT,
+            prenom TEXT,
+            date_premiere_apparition DATE,
+            date_derniere_apparition DATE,
+            est_actif BOOLEAN
+        )''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS structures (
+            id_structure TEXT PRIMARY KEY,
+            type_id TEXT,
+            nom_structure TEXT,
+            date_creation DATE,
+            etat_administratif TEXT,
+            nom_dirigeant TEXT,
+            annee_naissance_dirigeant INTEGER,
+            adresse_normalisee TEXT,
+            latitude REAL,
+            longitude REAL,
+            date_dernier_enrichissement DATETIME
+        )''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS activites (
+            id_activite INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_pp TEXT,
+            id_structure TEXT,
+            profession TEXT,
+            mode_exercice TEXT,
+            date_maj DATE,
+            FOREIGN KEY (id_pp) REFERENCES professionnels (id_pp),
+            FOREIGN KEY (id_structure) REFERENCES structures (id_structure)
+        )''')
+        
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_activites_id_pp ON activites (id_pp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_activites_id_structure ON activites (id_structure)')
+        
+        print("Structure de la base de données vérifiée/créée.")
+
+def telecharger_et_dezipper():
+    """Télécharge et dézippe le fichier PS_LibreAcces."""
+    print(f"Téléchargement de {ZIP_URL}...")
+    with requests.get(ZIP_URL, stream=True, verify=False) as r:
+        r.raise_for_status()
+        with open(ZIP_PATH, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
-        file_size = os.path.getsize(zip_path)
-        print(f"Téléchargé: {file_size} bytes (~{file_size / (1024*1024):.1f} Mo)")
-        if file_size < 100 * 1024 * 1024:
-            print("Warning: Fichier trop petit ? vérifie l'URL ou réseau.")
-    else:
-        raise Exception(f"Erreur téléchargement: {response.status_code} - {response.text[:200]}")
     
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall("data/")
-    os.remove(zip_path)
-    print("Extraction terminée dans ./data/")
+    print(f"Décompression de {ZIP_PATH}...")
+    with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
+        txt_filename = next((name for name in zip_ref.namelist() if 'Personne_activite' in name), None)
+        if not txt_filename:
+            raise FileNotFoundError("Le fichier 'Personne_activite' est introuvable dans le ZIP.")
+        zip_ref.extract(txt_filename, path=".")
+    
+    os.remove(ZIP_PATH)
+    return txt_filename
 
-def parse_and_load_to_db():
-    data_dir = "data/"
-    pattern = os.path.join(data_dir, "PS_LibreAcces_Personne_activite_*.txt")
-    txt_files = glob.glob(pattern)
-    if not txt_files:
-        raise Exception(f"Aucun fichier trouvé pour le pattern: {pattern}")
-    txt_file = txt_files[0]
-    print(f"Fichier détecté: {os.path.basename(txt_file)}")
+def integrer_donnees(txt_filename, date_maj_str):
+    """Intègre les données du fichier texte dans la base de données normalisée."""
+    print(f"Intégration des données du {date_maj_str}...")
     
-    full_path = txt_file
-    
-    print(f"Parsing de {os.path.basename(txt_file)}...")
-    df = pd.read_csv(full_path, sep=DELIMITER, encoding='utf-8', low_memory=False, encoding_errors='replace')
-    print(f"Lignes lues: {len(df)}")
-    print("Colonnes détectées (10 premières):", df.columns.tolist()[:10])
-    
-    # Nettoyage : drop sans 'Identifiant PP'
-    if 'Identifiant PP' in df.columns:
-        df_clean = df.dropna(subset=['Identifiant PP'])
-        print(f"Lignes après nettoyage: {len(df_clean)}")
-    else:
-        print("Warning: 'Identifiant PP' non trouvé ? sans drop.")
-        df_clean = df
-    
-    # Ajoute date_maj
-    df_clean = df_clean.copy()
-    df_clean['date_maj'] = datetime.now().strftime('%Y-%m-%d')
-    
-    # Insertion (to_sql crée la table auto avec toutes les colonnes)
-    conn = sqlite3.connect(DB_FILE)
-    df_clean.to_sql('personnes_activites', conn, if_exists='replace', index=False)
-    conn.commit()
-    time.sleep(2)  # Force flush disque pour subprocess detect_nouveaux.py
-    print("DB flushée avec sleep(2) - Table prête pour détection.")
-    conn.close()
-    print(f"Inséré {len(df_clean)} lignes (toutes colonnes). DB: {DB_FILE}")
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute('UPDATE professionnels SET est_actif = FALSE')
+        print("Tous les professionnels marqués comme 'inactifs' avant la mise à jour.")
+
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        
+        # --- CORRECTION FINALE : Passage de l'encodage à 'utf-8' ---
+        reader = pd.read_csv(txt_filename, sep='|', header=0, dtype=str, chunksize=CHUNK_SIZE, encoding='utf-8', on_bad_lines='warn')
+        
+        total_rows = 0
+        required_cols_map = {
+            "Identifiant PP": "id_pp",
+            "Nom d'exercice": "nom",
+            "Prénom d'exercice": "prenom",
+            "Identifiant technique de la structure": "id_structure",
+            "Libellé profession": "profession",
+            "Libellé mode exercice": "mode_exercice"
+        }
+
+        for chunk in reader:
+            chunk.columns = [col.strip() for col in chunk.columns]
+            
+            missing_cols = set(required_cols_map.keys()) - set(chunk.columns)
+            if missing_cols:
+                raise ValueError(f"Colonnes manquantes dans le fichier source : {list(missing_cols)}")
+
+            chunk.dropna(subset=["Identifiant PP"], inplace=True)
+            total_rows += len(chunk)
+
+            pros_data = chunk[["Identifiant PP", "Nom d'exercice", "Prénom d'exercice"]].drop_duplicates(subset=['Identifiant PP'])
+            structures_data = chunk[['Identifiant technique de la structure']].dropna().drop_duplicates()
+            activites_data = chunk[["Identifiant PP", "Identifiant technique de la structure", "Libellé profession", "Libellé mode exercice"]]
+
+            cursor.executemany(f'''
+                INSERT INTO professionnels (id_pp, nom, prenom, date_premiere_apparition, date_derniere_apparition, est_actif)
+                VALUES (?, ?, ?, '{date_maj_str}', '{date_maj_str}', TRUE)
+                ON CONFLICT(id_pp) DO UPDATE SET
+                    date_derniere_apparition = '{date_maj_str}',
+                    est_actif = TRUE;
+            ''', pros_data.to_records(index=False))
+
+            cursor.executemany('INSERT OR IGNORE INTO structures (id_structure) VALUES (?)', structures_data.to_records(index=False))
+
+            activites_data['date_maj'] = date_maj_str
+            cursor.executemany('INSERT INTO activites (id_pp, id_structure, profession, mode_exercice, date_maj) VALUES (?, ?, ?, ?, ?)', activites_data.to_records(index=False))
+            
+            conn.commit()
+            print(f"  -> {total_rows} lignes traitées...")
+
+    print("Intégration terminée.")
+    os.remove(txt_filename)
+    print("Nettoyage du fichier .txt terminé.")
 
 if __name__ == "__main__":
-    os.makedirs("data", exist_ok=True)
-    # download_and_extract(URL)  # Commenté pour test – Décommente pour full run
-    parse_and_load_to_db()
-    print("Setup terminé ! Vérifie avec: sqlite3 crm_sante_current.db 'SELECT COUNT(*) FROM personnes_activites;'")
+    creer_base_de_donnees()
+    nom_fichier_txt = telecharger_et_dezipper()
+    date_du_jour = datetime.now().strftime('%Y-%m-%d')
+    integrer_donnees(nom_fichier_txt, date_du_jour)
+    
+    print("\n--- Processus terminé avec succès ---")
+    print(f"La base de données '{DB_NAME}' est prête et à jour.")
